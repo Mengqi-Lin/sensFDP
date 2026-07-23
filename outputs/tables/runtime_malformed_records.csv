@@ -1,0 +1,2 @@
+file,record,seed,error
+closed_testing_equi_K20_I500.csv,607,336,"SyntaxError: '[' was never closed (<unknown>, line 1)"

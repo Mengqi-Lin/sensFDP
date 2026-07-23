@@ -1,0 +1,7 @@
+setting,effect_correlation,method,probability_success,probability_exact_recovery,average_number_true,monte_carlo_se,replicates
+6,-0.2,"$\Gamma^*(\mathcal{R},1)$ selector",0.9049666666666667,0.2685333333333333,1.1735,0.008809884073625717,1000
+6,-0.2,Naive selector,0.829,0.144,0.973,0.011912216456264587,1000
+0,0.0,"$\Gamma^*(\mathcal{R},1)$ selector",0.8928333333333334,0.1774,1.0702333333333334,0.009126502234867585,1000
+0,0.0,Naive selector,0.81,0.167,0.977,0.012411851354816253,1000
+3,0.2,"$\Gamma^*(\mathcal{R},1)$ selector",0.8508,0.12425,0.97505,0.010306255976133084,1000
+3,0.2,Naive selector,0.781,0.209,0.99,0.013084731950262114,1000

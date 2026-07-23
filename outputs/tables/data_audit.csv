@@ -1,0 +1,18 @@
+experiment,file,records,valid_records,distinct_seeds,expected_seeds,missing_seeds,extra_seeds,duplicate_keys,missing_record_keys,unexpected_record_keys,malformed_records,status,note
+subset selection,I500_setting0.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting1.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting2.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting3.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting4.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting5.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting6.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting7.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+subset selection,I500_setting8.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+screening,Gamma_1.25.csv,99,99,99,100,1,0,0,0,0,0,warning,missing seeds: 60
+screening,Gamma_1.5.csv,100,100,100,100,0,0,0,0,0,0,complete,
+screening,Gamma_1.75.csv,100,100,100,100,0,0,0,0,0,0,complete,
+screening,Gamma_2.0.csv,100,100,100,100,0,0,0,0,0,0,complete,
+exact versus naive,rho0.0_I500_Gammalist1_1.25_1.5_1.75_nsim10.csv,1000,1000,100,100,0,0,0,0,0,0,complete,
+exact versus naive,rho0.2_I500_Gammalist1_1.25_1.5_1.75_nsim10.csv,990,990,99,100,1,0,0,10,0,0,warning,missing seeds: 54; missing record keys: 10
+runtime,closed_testing_equi_K10_I500.csv,955,955,954,1000,47,1,1,0,0,0,warning,"missing seeds: 47 (8,30,132,178,186,217,268,284,294,323,335,340,...); extra seeds: 1000; duplicate keys: 1; legacy runtime outputs; algorithm decisions must be revalidated"
+runtime,closed_testing_equi_K20_I500.csv,607,606,606,1000,394,0,0,0,0,1,warning,"missing seeds: 394 (0,1,2,3,4,5,6,7,8,9,10,11,...); malformed records: 1; legacy runtime outputs; algorithm decisions must be revalidated"

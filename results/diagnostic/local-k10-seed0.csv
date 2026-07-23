@@ -1,0 +1,2 @@
+setting,replicate,seed,pairs,outcomes,effect_pattern,correlation,gamma,screening_seconds,enumerative_optimization_seconds,miqcp_optimization_seconds,enumerative_total_seconds,miqcp_total_seconds,runtime_ratio,relative_runtime_reduction,number_rejected,rejection_set
+1,0,0,500,10,linear,0.2,1.25,0.0016304999589920044,3.443504875060171,0.39054983318783343,3.445135375019163,0.39218033314682543,8.784569453994942,0.8861640282728676,6,4|5|6|7|8|9

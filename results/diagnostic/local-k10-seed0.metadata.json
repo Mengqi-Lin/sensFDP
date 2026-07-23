@@ -1,0 +1,28 @@
+{
+  "python": "3.14.6",
+  "platform": "macOS-15.2-arm64-arm-64bit-Mach-O",
+  "gurobi": [
+    13,
+    0,
+    1
+  ],
+  "gurobi_threads": 1,
+  "command_arguments": {
+    "pairs": 500,
+    "outcomes": 10,
+    "replicates": 1,
+    "gammas": [
+      1.25
+    ],
+    "effect_patterns": [
+      "linear"
+    ],
+    "correlations": [
+      0.2
+    ],
+    "alpha": 0.05,
+    "threads": 1,
+    "seed": 0,
+    "output": "results/diagnostic/local-k10-seed0.csv"
+  }
+}

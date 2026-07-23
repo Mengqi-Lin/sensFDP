@@ -1,0 +1,56 @@
+{
+  "source_rows": 6526,
+  "complete_case_rows": 3469,
+  "matched_rows": 3469,
+  "number_matched_sets": 1435,
+  "set_size_distribution": {
+    "2": 1092,
+    "3": 175,
+    "4": 80,
+    "5": 88
+  },
+  "treatment_counts": {
+    "0": 1927,
+    "1": 1542
+  },
+  "number_outcomes": 21,
+  "preliminary_outcome_indices": [
+    0,
+    1,
+    5,
+    6,
+    7,
+    9,
+    11,
+    14,
+    15,
+    16,
+    18,
+    19,
+    20
+  ],
+  "preliminary_outcomes": [
+    "alcohol",
+    "spouse",
+    "anger",
+    "anxiety",
+    "self_acceptance",
+    "positive_relations",
+    "environmental_mastery",
+    "neuroticism",
+    "conscientiousness",
+    "agreeableness",
+    "optimism",
+    "social_support",
+    "obesity"
+  ],
+  "covariates_with_negative_sentinels": [
+    "hb042re",
+    "piearl",
+    "sesp57",
+    "edfa57q",
+    "edmo57q"
+  ],
+  "matching_status": "matched_index.csv is treated as a pinned external R result; the original R matching script was not included",
+  "score_status": "corrected: spouse is constructed from gc040re rather than gu034rec"
+}

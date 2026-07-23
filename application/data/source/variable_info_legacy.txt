@@ -1,0 +1,18 @@
+sexrsp   : Sex of respondent (male/female)
+sibcount : Number of siblings
+
+hb042re  :  Summary of ever attended primary or elementary school in Wisconsin
+piearl   : Early-life parental income measure (commonly constructed from late-1950s parental income; confirm exact construction in your file)
+
+ocf157   : Father’s occupational status/score (1957; commonly Duncan SEI-based)
+ocm157   : Mother’s occupational status/score (1957; confirm exact coding/scale in your file)
+
+ses57    : Composite parental socioeconomic status (constructed from parents’ education, father’s occupation status, and early parental income)
+sesp57   : Family income when respondent was a high-school senior (1957)
+
+edfa57q  : Father’s education (years/attainment; 1957 report)
+edmo57q  : Mother’s education (years/attainment; 1957 report)
+
+res57    : Area of residence in 1957 (degree of urbanization / residential category)
+pop57    : 1957 population of the town where the graduate attended high school
+rlur57   : Coarsened urban/rural measure based on (or derived from) the high-school town’s population

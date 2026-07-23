@@ -1,0 +1,4 @@
+setting,effect_correlation,tied_replicates,tie_probability,maximum_number_of_maximizers,replicates
+6,-0.2,123,0.123,5,1000
+0,0.0,160,0.16,6,1000
+3,0.2,205,0.205,5,1000

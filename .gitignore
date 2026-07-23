@@ -1,0 +1,48 @@
+.Rproj.user/
+
+# Cluster logs
+slurm-*.out
+*.err
+
+# Restricted application data
+application/data/source/*.csv
+application/data/derived/*.csv
+application/data/matching/*.csv
+.Rproj.user/
+
+# Cluster logs
+slurm-*.out
+*.err
+
+# Restricted application data
+application/data/source/*.csv
+application/data/derived/*.csv
+application/data/matching/*.csv# macOS
+.DS_Store
+
+# Python
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# Cluster logs
+slurm-*.out
+*.err
+
+# Participant-level WLS data
+application/data/source/*.csv
+application/data/derived/*.csv
+application/data/matching/*.csv
