@@ -19,6 +19,9 @@ import pandas as pd
 
 from fdp_sensitivity.data import generate_pair_data, prepare_study
 from fdp_sensitivity.optimization import (
+    DEFAULT_DECISION_TOLERANCE,
+    SOLVER_FEASIBILITY_TOLERANCE,
+    SOLVER_OPTIMALITY_TOLERANCE,
     enumerative_elementary_rejections,
     individual_worst_pvalues,
     miqcp_elementary_rejections,
@@ -44,6 +47,12 @@ def parse_args() -> argparse.Namespace:
         "--correlations", type=float, nargs="+", default=[0.0, 0.2]
     )
     parser.add_argument("--alpha", type=float, default=0.05)
+    parser.add_argument(
+        "--decision-tolerance",
+        type=float,
+        default=DEFAULT_DECISION_TOLERANCE,
+        help="one shared conservative zeta-boundary tolerance for both methods",
+    )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
@@ -82,6 +91,8 @@ def main() -> None:
         raise ValueError("threads must be positive")
     if not 0 < args.alpha < 1:
         raise ValueError("alpha must lie in (0, 1)")
+    if not 0 < args.decision_tolerance < 1:
+        raise ValueError("decision-tolerance must lie in (0, 1)")
     if any(gamma < 1 for gamma in args.gammas):
         raise ValueError("every gamma must be at least one")
 
@@ -112,7 +123,11 @@ def main() -> None:
 
                     screening_start = time.perf_counter()
                     study = prepare_study(index, scores, assignment)
-                    p_values = individual_worst_pvalues(study, gamma)
+                    p_values = individual_worst_pvalues(
+                        study,
+                        gamma,
+                        decision_tolerance=args.decision_tolerance,
+                    )
                     screening_seconds = time.perf_counter() - screening_start
 
                     methods = (
@@ -126,12 +141,54 @@ def main() -> None:
                     optimization_seconds: dict[str, float] = {}
                     for name, function in methods:
                         start = time.perf_counter()
-                        results[name] = function(
-                            study,
-                            gamma,
-                            alpha=args.alpha,
-                            worst_pvalues=p_values,
-                        )
+                        try:
+                            results[name] = function(
+                                study,
+                                gamma,
+                                alpha=args.alpha,
+                                worst_pvalues=p_values,
+                                decision_tolerance=args.decision_tolerance,
+                            )
+                        except Exception as error:
+                            gamma_tag = str(gamma).replace(".", "p")
+                            failure = args.output.with_suffix(
+                                f".setting-{setting}.gamma-{gamma_tag}"
+                                f".replicate-{replicate}.{name}-error.failure.npz"
+                            )
+                            failure.parent.mkdir(parents=True, exist_ok=True)
+                            np.savez_compressed(
+                                failure,
+                                assignment=assignment,
+                                outcomes=generated_outcomes,
+                                index=index,
+                                scores=scores,
+                                observed_statistics=study.observed_statistics,
+                                p_values=p_values,
+                                enumerative_rejections=np.asarray(
+                                    sorted(results.get("enumerative", set())),
+                                    dtype=int,
+                                ),
+                                miqcp_rejections=np.asarray(
+                                    sorted(results.get("miqcp", set())), dtype=int
+                                ),
+                            )
+                            failure.with_suffix(".json").write_text(
+                                json.dumps(
+                                    {
+                                        "method": name,
+                                        "error_type": type(error).__name__,
+                                        "error": str(error),
+                                        "setting": setting,
+                                        "replicate": replicate,
+                                        "seed": args.seed,
+                                        "gamma": gamma,
+                                        "decision_tolerance": args.decision_tolerance,
+                                    },
+                                    indent=2,
+                                ),
+                                encoding="utf-8",
+                            )
+                            raise
                         optimization_seconds[name] = time.perf_counter() - start
 
                     if results["enumerative"] != results["miqcp"]:
@@ -146,7 +203,15 @@ def main() -> None:
                             assignment=assignment,
                             outcomes=generated_outcomes,
                             index=index,
+                            scores=scores,
+                            observed_statistics=study.observed_statistics,
                             p_values=p_values,
+                            enumerative_rejections=np.asarray(
+                                sorted(results["enumerative"]), dtype=int
+                            ),
+                            miqcp_rejections=np.asarray(
+                                sorted(results["miqcp"]), dtype=int
+                            ),
                         )
                         raise RuntimeError(
                             "algorithm mismatch in "
@@ -193,6 +258,9 @@ def main() -> None:
         "platform": platform.platform(),
         "gurobi": gp.gurobi.version(),
         "gurobi_threads": args.threads,
+        "decision_tolerance": args.decision_tolerance,
+        "gurobi_feasibility_tolerance": SOLVER_FEASIBILITY_TOLERANCE,
+        "gurobi_optimality_tolerance": SOLVER_OPTIMALITY_TOLERANCE,
         "command_arguments": vars(args) | {"output": str(args.output)},
     }
     args.output.with_suffix(".metadata.json").write_text(

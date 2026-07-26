@@ -9,7 +9,12 @@ import numpy as np
 
 from .data import PreparedStudy
 from .multiple_testing import naive_fdp_bound
-from .optimization import exact_fdp_bound, individual_worst_pvalues
+from .optimization import (
+    DEFAULT_DECISION_TOLERANCE,
+    NumericalDecisionError,
+    exact_fdp_bound,
+    individual_worst_pvalues,
+)
 
 
 @dataclass(frozen=True)
@@ -33,7 +38,7 @@ def compare_generalized_sensitivity_values(
     lower_gamma: float = 1.0,
     upper_gamma: float = 3.0,
     precision: float = 0.01,
-    decision_tolerance: float = 1e-8,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> SensitivityValueComparison:
     """Compute exact and naive values while sharing worst-p-value work.
@@ -52,6 +57,10 @@ def compare_generalized_sensitivity_values(
         raise ValueError("require 1 <= lower_gamma <= upper_gamma")
     if precision <= 0:
         raise ValueError("precision must be positive")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must lie in (0, 1)")
+    if not np.isfinite(decision_tolerance) or decision_tolerance < 0:
+        raise ValueError("decision_tolerance must be finite and nonnegative")
 
     pvalue_cache: dict[float, np.ndarray] = {}
     exact_cache: dict[float, int] = {}
@@ -87,6 +96,12 @@ def compare_generalized_sensitivity_values(
             )
             exact_cache[gamma_key] = result.bound
             exact_calls += result.optimization_calls
+            if exact_cache[gamma_key] > naive_bound(gamma_key):
+                raise NumericalDecisionError(
+                    "exact FDP bound exceeded the naive bound at "
+                    f"Gamma={gamma_key}"
+                )
+            _check_monotone_cache(exact_cache, "exact")
         return exact_cache[gamma_key]
 
     def naive_bound(gamma: float) -> int:
@@ -95,7 +110,20 @@ def compare_generalized_sensitivity_values(
             naive_cache[gamma_key] = naive_fdp_bound(
                 pvalues(gamma_key), chosen, alpha=alpha
             )
+            _check_monotone_cache(naive_cache, "naive")
         return naive_cache[gamma_key]
+
+    def _check_monotone_cache(values: dict[float, int], label: str) -> None:
+        ordered = sorted(values.items())
+        for (left_gamma, left_value), (right_gamma, right_value) in zip(
+            ordered, ordered[1:]
+        ):
+            if left_value > right_value:
+                raise NumericalDecisionError(
+                    f"{label} FDP bound decreased from {left_value} to "
+                    f"{right_value} between Gamma={left_gamma} and "
+                    f"Gamma={right_gamma}"
+                )
 
     def locate(bound_function) -> tuple[float, bool]:
         if bound_function(lower_gamma) > threshold:
@@ -113,6 +141,10 @@ def compare_generalized_sensitivity_values(
 
     exact_value, exact_censored = locate(exact_bound)
     naive_value, naive_censored = locate(naive_bound)
+    if exact_value + precision < naive_value:
+        raise NumericalDecisionError(
+            "exact generalized sensitivity value fell below the naive value"
+        )
     return SensitivityValueComparison(
         exact=exact_value,
         naive=naive_value,
@@ -132,7 +164,7 @@ def generalized_sensitivity_values(
     lower_gamma: float = 1.0,
     upper_gamma: float = 3.0,
     precision: float = 0.01,
-    decision_tolerance: float = 1e-8,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> np.ndarray:
     """Compute generalized sensitivity values by monotone bisection in Gamma.
@@ -153,6 +185,10 @@ def generalized_sensitivity_values(
         raise ValueError("require 1 <= lower_gamma <= upper_gamma")
     if precision <= 0:
         raise ValueError("precision must be positive")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must lie in (0, 1)")
+    if not np.isfinite(decision_tolerance) or decision_tolerance < 0:
+        raise ValueError("decision_tolerance must be finite and nonnegative")
 
     cache: dict[float, int] = {}
 
@@ -174,6 +210,16 @@ def generalized_sensitivity_values(
                 decision_tolerance=decision_tolerance,
                 output_flag=output_flag,
             ).bound
+            ordered = sorted(cache.items())
+            for (left_gamma, left_value), (right_gamma, right_value) in zip(
+                ordered, ordered[1:]
+            ):
+                if left_value > right_value:
+                    raise NumericalDecisionError(
+                        "exact FDP bound decreased from "
+                        f"{left_value} to {right_value} between "
+                        f"Gamma={left_gamma} and Gamma={right_gamma}"
+                    )
         return cache[key]
 
     lower_bound = bound(lower_gamma)
@@ -194,4 +240,9 @@ def generalized_sensitivity_values(
             else:
                 left = midpoint
         answers[position] = right
+    order = np.argsort(requested)
+    if np.any(np.diff(answers[order]) < -precision):
+        raise NumericalDecisionError(
+            "generalized sensitivity values decreased with the FDP threshold"
+        )
     return answers

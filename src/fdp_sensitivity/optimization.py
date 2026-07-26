@@ -8,6 +8,7 @@ from math import ceil, log2
 from typing import Iterable
 
 import numpy as np
+from scipy.optimize import brentq
 from scipy.stats import chi2, norm
 
 from .data import PreparedStudy
@@ -21,6 +22,20 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local installation
     GRB = None
 
 
+# The statistical boundary is zero.  We use one small *positive* numerical
+# slack everywhere, so a solver-near-boundary intersection is treated as
+# nonrejected.  This is conservative and, unlike the old negative margins,
+# cannot create extra rejections merely because of numerical uncertainty.
+DEFAULT_DECISION_TOLERANCE = 1e-7
+SOLVER_FEASIBILITY_TOLERANCE = 1e-9
+SOLVER_OPTIMALITY_TOLERANCE = 1e-9
+SOLVER_BAR_QCP_TOLERANCE = 1e-10
+
+
+class NumericalDecisionError(RuntimeError):
+    """Raised when an optimization does not certify the requested decision."""
+
+
 def _require_gurobi() -> None:
     if gp is None:
         raise ModuleNotFoundError(
@@ -32,6 +47,11 @@ def _new_model(output_flag: int = 0):
     _require_gurobi()
     model = gp.Model()
     model.Params.OutputFlag = output_flag
+    model.Params.FeasibilityTol = SOLVER_FEASIBILITY_TOLERANCE
+    model.Params.IntFeasTol = SOLVER_FEASIBILITY_TOLERANCE
+    model.Params.OptimalityTol = SOLVER_OPTIMALITY_TOLERANCE
+    model.Params.BarQCPConvTol = SOLVER_BAR_QCP_TOLERANCE
+    model.Params.NumericFocus = 2
     return model
 
 
@@ -86,11 +106,112 @@ def _zeta_expression(
 
 def _optimize_with_numeric_retry(model) -> None:
     model.optimize()
-    if model.Status == GRB.NUMERIC:
+    if model.Status in (GRB.NUMERIC, GRB.SUBOPTIMAL):
         model.Params.NumericFocus = 3
         model.Params.ScaleFlag = 2
         model.Params.BarHomogeneous = 1
         model.optimize()
+
+
+def _retry_inf_or_unbd(model) -> None:
+    """Disambiguate ``INF_OR_UNBD`` before it is used as a decision."""
+    if model.Status == GRB.INF_OR_UNBD:
+        model.Params.DualReductions = 0
+        model.reset()
+        _optimize_with_numeric_retry(model)
+
+
+def _zeta_value(
+    study: PreparedStudy,
+    outcome: int,
+    critical_probability: float,
+    probabilities: list[np.ndarray],
+) -> float:
+    """Recompute zeta outside Gurobi for incumbent validation."""
+    quantile = float(chi2.ppf(1 - critical_probability, df=1))
+    mean = 0.0
+    variance = 0.0
+    for b, size in enumerate(study.set_sizes):
+        p = probabilities[b]
+        q = study.scores[b, :size, outcome]
+        set_mean = float(p @ q)
+        mean += set_mean
+        variance += float(p @ (q**2) - set_mean**2)
+    residual = float(study.observed_statistics[outcome]) - mean
+    return residual**2 - quantile * max(variance, 0.0)
+
+
+def paired_minimum_zeta(
+    study: PreparedStudy,
+    outcome: int,
+    gamma: float,
+    critical_probability: float,
+) -> float:
+    """Exact minimum-zeta oracle for matched pairs.
+
+    The pairwise problem is a box-constrained convex quadratic.  Its KKT
+    equations reduce to one monotone scalar root, so this calculation is both
+    exact (up to floating point) and much faster than a Gurobi solve.
+    """
+    if any(size != 2 for size in study.set_sizes):
+        raise ValueError("paired_minimum_zeta requires matched pairs")
+    if outcome not in range(study.number_outcomes):
+        raise ValueError("invalid outcome index")
+    if gamma < 1:
+        raise ValueError("gamma must be at least one")
+    if not 0 < critical_probability < 1:
+        raise ValueError("critical_probability must lie in (0, 1)")
+
+    q = study.scores[:, :2, outcome]
+    low_score = q.min(axis=1)
+    differences = q.max(axis=1) - low_score
+    positive = differences > 0
+    differences = differences[positive]
+    centered_observed = float(study.observed_statistics[outcome] - low_score.sum())
+    if differences.size == 0:
+        return centered_observed**2
+
+    lower_probability = 1 / (1 + gamma)
+    upper_probability = gamma / (1 + gamma)
+    quantile = float(chi2.ppf(1 - critical_probability, df=1))
+    residual_lower = centered_observed - upper_probability * differences.sum()
+    residual_upper = centered_observed - lower_probability * differences.sum()
+
+    def equation(residual: float) -> float:
+        probabilities = np.clip(
+            0.5 + residual / (quantile * differences),
+            lower_probability,
+            upper_probability,
+        )
+        return float(
+            residual - centered_observed + probabilities @ differences
+        )
+
+    lower_value = equation(residual_lower)
+    upper_value = equation(residual_upper)
+    if lower_value >= 0:
+        residual = residual_lower
+    elif upper_value <= 0:
+        residual = residual_upper
+    else:
+        residual = float(
+            brentq(
+                equation,
+                residual_lower,
+                residual_upper,
+                xtol=1e-14,
+                rtol=1e-14,
+            )
+        )
+    probabilities = np.clip(
+        0.5 + residual / (quantile * differences),
+        lower_probability,
+        upper_probability,
+    )
+    variance = np.sum(
+        probabilities * (1 - probabilities) * differences**2
+    )
+    return float(residual**2 - quantile * variance)
 
 
 def minimum_zeta(
@@ -104,17 +225,22 @@ def minimum_zeta(
     """Compute the minimum of ``zeta_k(rho; critical_probability)``."""
     if outcome not in range(study.number_outcomes):
         raise ValueError("invalid outcome index")
+    if all(size == 2 for size in study.set_sizes):
+        return paired_minimum_zeta(
+            study, outcome, gamma, critical_probability
+        )
     model = _new_model(output_flag)
     rho = _assignment_variables(model, study.set_sizes, gamma)
     expression = _zeta_expression(
         model, rho, study, outcome, critical_probability, prefix=f"k{outcome}"
     )
-    zeta = model.addVar(lb=-GRB.INFINITY, name="zeta")
-    model.addConstr(zeta >= expression)
-    model.setObjective(zeta, GRB.MINIMIZE)
+    model.setObjective(expression, GRB.MINIMIZE)
     _optimize_with_numeric_retry(model)
-    if model.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        raise RuntimeError(f"minimum-zeta optimization ended with status {model.Status}")
+    if model.Status != GRB.OPTIMAL:
+        raise NumericalDecisionError(
+            f"minimum-zeta optimization did not certify optimality; "
+            f"status={model.Status}, solutions={model.SolCount}"
+        )
     return float(model.ObjVal)
 
 
@@ -124,7 +250,7 @@ def exact_two_sided_worst_pvalue(
     gamma: float,
     *,
     tolerance: float = 1e-6,
-    decision_tolerance: float = 1e-9,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> float:
     """Compute the worst normally approximated two-sided p-value by bisection.
@@ -147,38 +273,42 @@ def exact_two_sided_worst_pvalue(
             midpoint,
             output_flag=output_flag,
         )
-        if value < -decision_tolerance:
+        # Ambiguity is resolved upward: retaining a possibly eligible outcome
+        # is conservative for every downstream multiple-testing screen.
+        if value <= decision_tolerance:
             lower = midpoint
         else:
             upper = midpoint
-    return (lower + upper) / 2
+    return upper
 
 
 def paired_two_sided_worst_pvalue(
-    study: PreparedStudy, outcome: int, gamma: float
+    study: PreparedStudy,
+    outcome: int,
+    gamma: float,
+    *,
+    tolerance: float = 1e-6,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
 ) -> float:
-    """Fast analytic worst p-value for matched pairs."""
+    """Exact worst normally approximated two-sided p-value for matched pairs."""
     if any(size != 2 for size in study.set_sizes):
         raise ValueError("paired_two_sided_worst_pvalue requires matched pairs")
     if gamma < 1:
         raise ValueError("gamma must be at least one")
-    q = study.scores[:, :2, outcome]
-    low_score = q.min(axis=1)
-    high_score = q.max(axis=1)
-    low_probability = 1 / (1 + gamma)
-    high_probability = gamma / (1 + gamma)
-    lower_mean = np.sum(high_probability * low_score + low_probability * high_score)
-    upper_mean = np.sum(low_probability * low_score + high_probability * high_score)
-    observed = float(study.observed_statistics[outcome])
-    if lower_mean <= observed <= upper_mean:
-        return 1.0
-    variance = np.sum(
-        low_probability * high_probability * (high_score - low_score) ** 2
-    )
-    if variance <= 0:
-        return float(observed == lower_mean)
-    target_mean = upper_mean if observed > upper_mean else lower_mean
-    return float(2 * norm.sf(abs(observed - target_mean) / np.sqrt(variance)))
+    if not 0 < tolerance < 1:
+        raise ValueError("tolerance must lie in (0, 1)")
+    lower, upper = 0.0, 1.0
+    iterations = ceil(log2(1 / tolerance))
+    for _ in range(iterations):
+        midpoint = (lower + upper) / 2
+        value = paired_minimum_zeta(
+            study, outcome, gamma, midpoint
+        )
+        if value <= decision_tolerance:
+            lower = midpoint
+        else:
+            upper = midpoint
+    return upper
 
 
 def no_hidden_bias_pvalue(study: PreparedStudy, outcome: int) -> float:
@@ -208,7 +338,7 @@ def individual_worst_pvalues(
     gamma: float,
     *,
     tolerance: float = 1e-6,
-    decision_tolerance: float = 1e-9,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> np.ndarray:
     """Compute all individual worst-case two-sided p-values."""
@@ -220,7 +350,13 @@ def individual_worst_pvalues(
     values = np.empty(study.number_outcomes)
     for k in range(study.number_outcomes):
         if paired:
-            values[k] = paired_two_sided_worst_pvalue(study, k, gamma)
+            values[k] = paired_two_sided_worst_pvalue(
+                study,
+                k,
+                gamma,
+                tolerance=tolerance,
+                decision_tolerance=decision_tolerance,
+            )
         else:
             values[k] = exact_two_sided_worst_pvalue(
                 study,
@@ -239,7 +375,7 @@ def local_test_rejects(
     gamma: float,
     alpha: float,
     *,
-    decision_tolerance: float = 1e-9,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> bool:
     """Return the Bonferroni local sensitivity-test decision for one subset."""
@@ -258,12 +394,18 @@ def local_test_rejects(
         model.addConstr(y >= expression)
     model.setObjective(y, GRB.MINIMIZE)
     _optimize_with_numeric_retry(model)
-    if model.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        raise RuntimeError(f"local-test optimization ended with status {model.Status}")
-    # Treat values within ``decision_tolerance`` of zero as rejections.  This
-    # matches the MIQCP convention that a nonrejection requires a value below
-    # ``-decision_tolerance``.
-    return bool(model.ObjVal > -decision_tolerance)
+    if model.SolCount and model.ObjVal <= decision_tolerance:
+        # A feasible point at or below the positive numerical slack is a
+        # conservative certificate of nonrejection.
+        return False
+    if model.Status == GRB.OPTIMAL and model.ObjBound > decision_tolerance:
+        return True
+    raise NumericalDecisionError(
+        "local-test sign was not certified: "
+        f"status={model.Status}, solutions={model.SolCount}, "
+        f"objective={getattr(model, 'ObjVal', np.nan)}, "
+        f"bound={getattr(model, 'ObjBound', np.nan)}"
+    )
 
 
 @dataclass(frozen=True)
@@ -273,6 +415,55 @@ class FDPBoundResult:
     selected_superset: tuple[int, ...] | None
 
 
+def _validated_miqcp_witness(
+    model,
+    rho,
+    theta,
+    study: PreparedStudy,
+    selected_candidates: set[int],
+    required_size: int,
+    chosen_candidates: set[int],
+    required_chosen: int,
+    gamma: float,
+    critical_probability: float,
+    decision_tolerance: float,
+) -> tuple[int, ...] | None:
+    """Return a selected subset only after validating the incumbent in NumPy."""
+    if model.SolCount <= 0:
+        return None
+    selected = tuple(
+        k for k in sorted(selected_candidates) if float(theta[k].X) > 0.5
+    )
+    if len(selected) != required_size:
+        return None
+    if len(set(selected) & chosen_candidates) != required_chosen:
+        return None
+
+    probabilities: list[np.ndarray] = []
+    validation_tolerance = 10 * SOLVER_FEASIBILITY_TOLERANCE
+    for b, size in enumerate(study.set_sizes):
+        p = np.asarray([float(rho[b, j].X) for j in range(size)])
+        if np.any(~np.isfinite(p)) or np.any(p < -validation_tolerance):
+            return None
+        if abs(float(p.sum()) - 1.0) > validation_tolerance:
+            return None
+        smallest = float(p.min())
+        largest = float(p.max())
+        if smallest <= 0 or largest > gamma * smallest + validation_tolerance:
+            return None
+        probabilities.append(p)
+
+    max_zeta = max(
+        _zeta_value(
+            study, k, critical_probability, probabilities
+        )
+        for k in selected
+    )
+    if max_zeta > decision_tolerance + validation_tolerance:
+        return None
+    return selected
+
+
 def exact_fdp_bound(
     study: PreparedStudy,
     subset: Iterable[int],
@@ -280,7 +471,7 @@ def exact_fdp_bound(
     alpha: float = 0.05,
     *,
     worst_pvalues: np.ndarray | None = None,
-    decision_tolerance: float = 1e-8,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> FDPBoundResult:
     """Compute the exact common-configuration FDP numerator bound by MIQCP."""
@@ -296,6 +487,10 @@ def exact_fdp_bound(
     worst_pvalues = np.asarray(worst_pvalues, dtype=float)
     if worst_pvalues.shape != (study.number_outcomes,):
         raise ValueError("worst_pvalues has the wrong shape")
+    if np.any(~np.isfinite(worst_pvalues)) or np.any(
+        (worst_pvalues < 0) | (worst_pvalues > 1)
+    ):
+        raise ValueError("worst_pvalues must be finite and lie in [0, 1]")
 
     calls = 0
     all_outcomes = set(range(study.number_outcomes))
@@ -314,7 +509,7 @@ def exact_fdp_bound(
             theta = model.addVars(sorted(eligible), vtype=GRB.BINARY, name="theta")
             y = model.addVar(
                 lb=-GRB.INFINITY,
-                ub=-decision_tolerance,
+                ub=decision_tolerance,
                 name="maximum_zeta",
             )
             for k in sorted(eligible):
@@ -328,19 +523,30 @@ def exact_fdp_bound(
             model.addConstr(gp.quicksum(theta[k] for k in eligible_chosen) == r)
             model.setObjective(0.0)
             _optimize_with_numeric_retry(model)
+            _retry_inf_or_unbd(model)
 
-            feasible_status = model.Status in (
-                GRB.OPTIMAL,
-                GRB.SOLUTION_LIMIT,
-                GRB.SUBOPTIMAL,
+            selected = _validated_miqcp_witness(
+                model,
+                rho,
+                theta,
+                study,
+                eligible,
+                size,
+                eligible_chosen,
+                r,
+                gamma,
+                threshold,
+                decision_tolerance,
             )
-            if model.Status == GRB.TIME_LIMIT and model.SolCount:
-                feasible_status = True
-            if feasible_status:
-                selected = tuple(k for k in sorted(eligible) if theta[k].X > 0.5)
+            if selected is not None:
                 return FDPBoundResult(r, calls, selected)
-            if model.Status not in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
-                raise RuntimeError(f"MIQCP ended with unresolved status {model.Status}")
+            if model.Status != GRB.INFEASIBLE:
+                raise NumericalDecisionError(
+                    "MIQCP did not provide a validated witness or an "
+                    f"infeasibility certificate; status={model.Status}, "
+                    f"solutions={model.SolCount}, max_violation="
+                    f"{getattr(model, 'MaxVio', np.nan)}"
+                )
     return FDPBoundResult(0, calls, None)
 
 
@@ -351,7 +557,7 @@ def enumerative_elementary_rejections(
     *,
     targets: Iterable[int] | None = None,
     worst_pvalues: np.ndarray | None = None,
-    decision_tolerance: float = 1e-9,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> set[int]:
     """Reference closed-testing implementation for elementary decisions."""
@@ -408,7 +614,7 @@ def miqcp_elementary_rejections(
     *,
     targets: Iterable[int] | None = None,
     worst_pvalues: np.ndarray | None = None,
-    decision_tolerance: float = 1e-8,
+    decision_tolerance: float = DEFAULT_DECISION_TOLERANCE,
     output_flag: int = 0,
 ) -> set[int]:
     """Elementary decisions obtained from the MIQCP FDP bound."""
