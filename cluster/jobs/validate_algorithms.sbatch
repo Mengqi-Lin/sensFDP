@@ -18,10 +18,10 @@ replicates="$5"
 seed="$SLURM_ARRAY_TASK_ID"
 
 mkdir -p -- "$run_dir"
-load_gurobi
+module load gurobi/10.0.2
 
 output="${run_dir}/K-${outcomes}_pairs-${pairs}_seed-${seed}.csv"
-"$PYTHON_BIN" "${PROJECT_ROOT}/experiments/validate_algorithms.py" \
+/sw/pkgs/arc/python3.10-anaconda/2023.03/bin/python "${PROJECT_ROOT}/experiments/validate_algorithms.py" \
     --outcomes "$outcomes" \
     --pairs "$pairs" \
     --replicates "$replicates" \
