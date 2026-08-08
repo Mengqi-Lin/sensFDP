@@ -29,7 +29,10 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local installation
 DEFAULT_DECISION_TOLERANCE = 1e-7
 SOLVER_FEASIBILITY_TOLERANCE = 1e-9
 SOLVER_OPTIMALITY_TOLERANCE = 1e-9
-SOLVER_BAR_QCP_TOLERANCE = 1e-10
+# Requiring 1e-10 QCP barrier convergence caused otherwise well-separated
+# paired problems to terminate SUBOPTIMAL.  The local-test boundary is 1e-7,
+# so 1e-8 is sufficient; all feasible witnesses are checked independently.
+SOLVER_BAR_QCP_TOLERANCE = 1e-8
 
 
 class NumericalDecisionError(RuntimeError):
@@ -119,6 +122,14 @@ def _retry_inf_or_unbd(model) -> None:
         model.Params.DualReductions = 0
         model.reset()
         _optimize_with_numeric_retry(model)
+
+
+def _safe_model_attribute(model, name: str):
+    """Read a diagnostic attribute without masking the original solver error."""
+    try:
+        return getattr(model, name)
+    except Exception:
+        return np.nan
 
 
 def _zeta_value(
@@ -369,6 +380,110 @@ def individual_worst_pvalues(
     return values
 
 
+def _validated_probabilities(
+    study: PreparedStudy,
+    probabilities: Iterable[np.ndarray],
+    gamma: float,
+) -> list[np.ndarray] | None:
+    """Validate assignment probabilities independently of the solver model."""
+    values = [np.asarray(p, dtype=float) for p in probabilities]
+    if len(values) != study.number_sets:
+        return None
+    validation_tolerance = 10 * SOLVER_FEASIBILITY_TOLERANCE
+    checked: list[np.ndarray] = []
+    for b, size in enumerate(study.set_sizes):
+        p = values[b]
+        if p.shape != (size,) or np.any(~np.isfinite(p)):
+            return None
+        if np.any(p < -validation_tolerance):
+            return None
+        if abs(float(p.sum()) - 1.0) > validation_tolerance:
+            return None
+        smallest = float(p.min())
+        largest = float(p.max())
+        if smallest <= 0 or largest > gamma * smallest + validation_tolerance:
+            return None
+        checked.append(p)
+    return checked
+
+
+def _validated_local_test_witness(
+    study: PreparedStudy,
+    selected: tuple[int, ...],
+    alpha: float,
+    gamma: float,
+    decision_tolerance: float,
+    probabilities: Iterable[np.ndarray],
+) -> bool:
+    """Check a proposed local-test nonrejection witness in NumPy."""
+    checked = _validated_probabilities(study, probabilities, gamma)
+    if checked is None:
+        return False
+    validation_tolerance = 10 * SOLVER_FEASIBILITY_TOLERANCE
+    critical_probability = alpha / len(selected)
+    max_zeta = max(
+        _zeta_value(study, k, critical_probability, checked) for k in selected
+    )
+    return bool(max_zeta <= decision_tolerance + validation_tolerance)
+
+
+def _paired_local_test_feasibility_model(
+    study: PreparedStudy,
+    selected: tuple[int, ...],
+    gamma: float,
+    alpha: float,
+    decision_tolerance: float,
+    output_flag: int,
+):
+    """Build the reduced convex feasibility model for matched pairs.
+
+    Write ``x_b = 2 rho_{b1} - 1`` and let ``d_{bk}`` be half the score
+    difference in pair ``b``.  Then each local constraint is the second-order
+    cone inequality
+
+    ``(r_k - d_k' x)^2 + c ||d_k * x||^2 <= c ||d_k||^2 + tolerance``.
+
+    This removes the per-outcome set-mean variables used by the generic
+    formulation and asks only the feasibility question required by the test.
+    """
+    model = _new_model(output_flag)
+    max_tilt = (gamma - 1) / (gamma + 1)
+    tilt = model.addVars(
+        study.number_sets,
+        lb=-max_tilt,
+        ub=max_tilt,
+        name="pair_tilt",
+    )
+    critical_probability = alpha / len(selected)
+    quantile = float(chi2.ppf(1 - critical_probability, df=1))
+    for k in selected:
+        q = study.scores[:, :2, k]
+        midpoint = 0.5 * (q[:, 0] + q[:, 1])
+        half_difference = 0.5 * (q[:, 0] - q[:, 1])
+        centered_observed = float(
+            study.observed_statistics[k] - midpoint.sum()
+        )
+        residual = centered_observed - gp.quicksum(
+            float(half_difference[b]) * tilt[b]
+            for b in range(study.number_sets)
+        )
+        squared_tilt = gp.quicksum(
+            float(half_difference[b] ** 2) * tilt[b] * tilt[b]
+            for b in range(study.number_sets)
+        )
+        right_hand_side = (
+            quantile * float(half_difference @ half_difference)
+            + decision_tolerance
+        )
+        model.addQConstr(
+            residual * residual + quantile * squared_tilt
+            <= right_hand_side,
+            name=f"local_test_{k}",
+        )
+    model.setObjective(0.0)
+    return model, tilt
+
+
 def local_test_rejects(
     study: PreparedStudy,
     outcomes: Iterable[int],
@@ -384,27 +499,68 @@ def local_test_rejects(
         raise ValueError("outcomes must be nonempty")
     if not set(selected).issubset(range(study.number_outcomes)):
         raise ValueError("invalid outcome index")
-    model = _new_model(output_flag)
-    rho = _assignment_variables(model, study.set_sizes, gamma)
-    y = model.addVar(lb=-GRB.INFINITY, name="maximum_zeta")
-    for k in selected:
-        expression = _zeta_expression(
-            model, rho, study, k, alpha / len(selected), prefix=f"k{k}"
+    paired = all(size == 2 for size in study.set_sizes)
+    if paired:
+        model, tilt = _paired_local_test_feasibility_model(
+            study,
+            selected,
+            gamma,
+            alpha,
+            decision_tolerance,
+            output_flag,
         )
-        model.addConstr(y >= expression)
-    model.setObjective(y, GRB.MINIMIZE)
+        rho = None
+    else:
+        model = _new_model(output_flag)
+        rho = _assignment_variables(model, study.set_sizes, gamma)
+        for k in selected:
+            expression = _zeta_expression(
+                model, rho, study, k, alpha / len(selected), prefix=f"k{k}"
+            )
+            model.addQConstr(
+                expression <= decision_tolerance,
+                name=f"local_test_{k}",
+            )
+        model.setObjective(0.0)
     _optimize_with_numeric_retry(model)
-    if model.SolCount and model.ObjVal <= decision_tolerance:
-        # A feasible point at or below the positive numerical slack is a
-        # conservative certificate of nonrejection.
-        return False
-    if model.Status == GRB.OPTIMAL and model.ObjBound > decision_tolerance:
+    _retry_inf_or_unbd(model)
+
+    if model.SolCount:
+        if paired:
+            probabilities = [
+                np.asarray(
+                    [
+                        0.5 * (1 + float(tilt[b].X)),
+                        0.5 * (1 - float(tilt[b].X)),
+                    ]
+                )
+                for b in range(study.number_sets)
+            ]
+        else:
+            probabilities = [
+                np.asarray([float(rho[b, j].X) for j in range(size)])
+                for b, size in enumerate(study.set_sizes)
+            ]
+        if _validated_local_test_witness(
+            study,
+            selected,
+            alpha,
+            gamma,
+            decision_tolerance,
+            probabilities,
+        ):
+            # A checked feasible point certifies conservative nonrejection.
+            return False
+    if model.Status == GRB.INFEASIBLE:
+        # Infeasibility of zeta_k <= tolerance for every selected k certifies
+        # rejection.  No globally optimized epigraph objective is needed.
         return True
     raise NumericalDecisionError(
-        "local-test sign was not certified: "
+        "local-test feasibility was not certified: "
+        f"outcomes={selected}, gamma={gamma}, alpha={alpha}, "
+        f"decision_tolerance={decision_tolerance}, "
         f"status={model.Status}, solutions={model.SolCount}, "
-        f"objective={getattr(model, 'ObjVal', np.nan)}, "
-        f"bound={getattr(model, 'ObjBound', np.nan)}"
+        f"max_violation={_safe_model_attribute(model, 'MaxVio')}"
     )
 
 
@@ -439,20 +595,18 @@ def _validated_miqcp_witness(
     if len(set(selected) & chosen_candidates) != required_chosen:
         return None
 
-    probabilities: list[np.ndarray] = []
-    validation_tolerance = 10 * SOLVER_FEASIBILITY_TOLERANCE
-    for b, size in enumerate(study.set_sizes):
-        p = np.asarray([float(rho[b, j].X) for j in range(size)])
-        if np.any(~np.isfinite(p)) or np.any(p < -validation_tolerance):
-            return None
-        if abs(float(p.sum()) - 1.0) > validation_tolerance:
-            return None
-        smallest = float(p.min())
-        largest = float(p.max())
-        if smallest <= 0 or largest > gamma * smallest + validation_tolerance:
-            return None
-        probabilities.append(p)
+    probabilities = _validated_probabilities(
+        study,
+        (
+            np.asarray([float(rho[b, j].X) for j in range(size)])
+            for b, size in enumerate(study.set_sizes)
+        ),
+        gamma,
+    )
+    if probabilities is None:
+        return None
 
+    validation_tolerance = 10 * SOLVER_FEASIBILITY_TOLERANCE
     max_zeta = max(
         _zeta_value(
             study, k, critical_probability, probabilities
@@ -545,7 +699,7 @@ def exact_fdp_bound(
                     "MIQCP did not provide a validated witness or an "
                     f"infeasibility certificate; status={model.Status}, "
                     f"solutions={model.SolCount}, max_violation="
-                    f"{getattr(model, 'MaxVio', np.nan)}"
+                    f"{_safe_model_attribute(model, 'MaxVio')}"
                 )
     return FDPBoundResult(0, calls, None)
 

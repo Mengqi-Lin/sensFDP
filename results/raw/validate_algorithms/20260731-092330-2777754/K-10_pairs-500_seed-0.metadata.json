@@ -1,0 +1,36 @@
+{
+  "python": "3.10.9",
+  "platform": "Linux-4.18.0-553.146.1.el8_10.x86_64-x86_64-with-glibc2.28",
+  "gurobi": [
+    12,
+    0,
+    3
+  ],
+  "gurobi_threads": 1,
+  "decision_tolerance": 1e-07,
+  "gurobi_feasibility_tolerance": 1e-09,
+  "gurobi_optimality_tolerance": 1e-09,
+  "command_arguments": {
+    "pairs": 500,
+    "outcomes": 10,
+    "replicates": 1,
+    "gammas": [
+      1.25,
+      1.5,
+      1.75
+    ],
+    "effect_patterns": [
+      "linear",
+      "half-null"
+    ],
+    "correlations": [
+      0.0,
+      0.2
+    ],
+    "alpha": 0.05,
+    "decision_tolerance": 1e-07,
+    "threads": 1,
+    "seed": 0,
+    "output": "/home/lemonkey/sensFDP/results/raw/validate_algorithms/20260731-092330-2777754/K-10_pairs-500_seed-0.csv"
+  }
+}
